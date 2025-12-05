@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Wiserobotics — Teacher Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial;} .hidden{display:none}</style>
+</head>
+<body class="bg-gray-50 p-6">
+  <div class="max-w-5xl mx-auto bg-white p-6 rounded-xl shadow">
+    <header class="flex items-center justify-between mb-6">
+      <div>
+        <h1 class="text-2xl font-bold text-indigo-700">Wiserobotics — Teacher Dashboard</h1>
+        <p class="text-sm text-gray-600">View, filter and print results submitted by students.</p>
+      </div>
+      <div>
+        <button id="logoutBtn" class="hidden bg-red-600 text-white px-3 py-2 rounded">Logout</button>
+      </div>
+    </header>
+
+    <!-- LOGIN PIN -->
+    <div id="loginBox" class="p-4 bg-indigo-50 rounded mb-6">
+      <label class="block font-semibold mb-2">Enter Teacher PIN to continue</label>
+      <div class="flex gap-2">
+        <input id="teacherPin" class="flex-1 p-3 border rounded" placeholder="Enter PIN" />
+        <button id="btnPin" class="bg-indigo-600 text-white px-4 py-2 rounded">Unlock</button>
+      </div>
+      <p class="text-sm text-gray-500 mt-2">PIN is provided by the exam administrator.</p>
+    </div>
+
+    <!-- DASHBOARD CONTENT -->
+    <div id="dashboard" class="hidden">
+      <div class="flex gap-3 items-center mb-4">
+        <div class="flex-1">
+          <label class="block text-sm font-semibold mb-1">Filter by school (partial names allowed)</label>
+          <input id="filterSchool" class="w-full p-3 border rounded" placeholder="type a school name, e.g. 'Crown'" oninput="filterTable()" />
+        </div>
+        <div class="w-48">
+          <label class="block text-sm font-semibold mb-1">Select Date Range</label>
+          <input id="filterDate" type="date" class="w-full p-3 border rounded" onchange="filterTable()" />
+        </div>
+        <div class="w-36">
+          <label class="block text-sm font-semibold mb-1 invisible">Buttons</label>
+          <div class="flex gap-2">
+            <button class="bg-green-600 text-white px-3 py-2 rounded" onclick="printResults()">Print</button>
+            <button class="border px-3 py-2 rounded" onclick="exportCSV()">Export CSV</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table id="resultsTable" class="w-full border-collapse">
+          <thead>
+            <tr class="bg-gray-100 text-left">
+              <th class="p-2 border">Name</th>
+              <th class="p-2 border">School</th>
+              <th class="p-2 border">Class</th>
+              <th class="p-2 border">Score</th>
+              <th class="p-2 border">Percent</th>
+              <th class="p-2 border">Date</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div id="noResults" class="hidden mt-4 p-3 bg-yellow-50 rounded text-yellow-800">No results found for the current filter.</div>
+    </div>
+
+    <div id="setupNotice" class="mt-6 text-sm text-gray-600">
+      <p><strong>Setup:</strong> This dashboard reads data from the Firestore collection <code>exam_results</code>. Make sure your <code>index.html</code> saved results to that collection (field names: <code>name, class, school, regNo, score, total, percent, timestamp</code>).</p>
+      <p class="mt-2">Replace the firebaseConfig placeholders below with your project's config in both <code>index.html</code> and <code>teacher.html</code>. While testing keep Firestore in <em>test mode</em>. For production tighten the rules and enable Firebase Authentication.</p>
+    </div>
+  </div>
+
+  <!-- FIREBASE + DASHBOARD LOGIC -->
+  <script type="module">
+    // ---------- FIREBASE SDK ----------
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js';
+    import { getFirestore, collection, getDocs, query, where, orderBy } from 'https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore.js';
+
+    // --- Paste your Firebase config here (same as index.html) ---
+    const firebaseConfig = {
+      apiKey: "REPLACE_ME",
+      authDomain: "REPLACE_ME",
+      projectId: "REPLACE_ME",
+      storageBucket: "REPLACE_ME",
+      messagingSenderId: "REPLACE_ME",
+      appId: "REPLACE_ME"
+    };
+
+    let db = null;
+    let FIREBASE_ENABLED = false;
+
+    try {
+      if (firebaseConfig.apiKey && firebaseConfig.apiKey !== 'REPLACE_ME') {
+        const app = initializeApp(firebaseConfig);
+        db = getFirestore(app);
+        FIREBASE_ENABLED = true;
+        console.log('Firebase initialized for dashboard');
+      } else {
+        console.warn('Firebase config not set — dashboard cannot fetch results.');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+
+    // ---------- DOM ----------
+    const btnPin = document.getElementById('btnPin');
+    const teacherPinInput = document.getElementById('teacherPin');
+    const loginBox = document.getElementById('loginBox');
+    const dashboard = document.getElementById('dashboard');
+    const resultsTableBody = document.querySelector('#resultsTable tbody');
+    const filterSchool = document.getElementById('filterSchool');
+    const filterDate = document.getElementById('filterDate');
+    const noResults = document.getElementById('noResults');
+
+    // Teacher PIN (client-side). You set it when you asked me — do not share publicly.
+    const TEACHER_PIN = '12345';
+
+    btnPin.addEventListener('click', async () => {
+      const val = teacherPinInput.value.trim();
+      if (val === TEACHER_PIN) {
+        // show dashboard
+        loginBox.classList.add('hidden');
+        dashboard.classList.remove('hidden');
+        document.getElementById('logoutBtn').classList.remove('hidden');
+        await loadAllResults();
+      } else {
+        alert('Incorrect PIN');
+      }
+    });
+
+    document.getElementById('logoutBtn').addEventListener('click', () => location.reload());
+
+    let cachedRows = []; // local cache for filtering/export
+
+    async function loadAllResults() {
+      resultsTableBody.innerHTML = '';
+      noResults.classList.add('hidden');
+
+      if (!FIREBASE_ENABLED || !db) {
+        noResults.classList.remove('hidden');
+        noResults.textContent = 'Firebase not configured. Paste your firebaseConfig into this file.';
+        return;
+      }
+
+      try {
+        // fetch all documents ordered by timestamp desc
+        const q = await getDocs(collection(db, 'exam_results'));
+        const rows = [];
+        q.forEach(doc => rows.push(doc.data()));
+
+        // normalize timestamps (some may store timestamp or ISO string)
+        cachedRows = rows.map(r => ({
+          name: r.name || '',
+          school: r.school || '',
+          class: r.class || '',
+          score: r.score || 0,
+          percent: r.percent || Math.round(((r.score||0)/(r.total||1))*100),
+          timestamp: r.timestamp || r.time || new Date().toISOString()
+        }));
+
+        renderTable(cachedRows);
+      } catch (e) {
+        console.error(e);
+        noResults.classList.remove('hidden');
+        noResults.textContent = 'Error fetching results. Check console.';
+      }
+    }
+
+    function renderTable(rows) {
+      resultsTableBody.innerHTML = '';
+      if (!rows.length) {
+        noResults.classList.remove('hidden');
+        return;
+      }
+      noResults.classList.add('hidden');
+      rows.forEach(r => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="p-2 border">${escapeHtml(r.name)}</td>
+          <td class="p-2 border">${escapeHtml(r.school)}</td>
+          <td class="p-2 border">${escapeHtml(r.class)}</td>
+          <td class="p-2 border">${escapeHtml(r.score.toString())}</td>
+          <td class="p-2 border">${escapeHtml(r.percent.toString()+'%')}</td>
+          <td class="p-2 border">${new Date(r.timestamp).toLocaleString()}</td>
+        `;
+        resultsTableBody.appendChild(tr);
+      });
+    }
+
+    function filterTable() {
+      const s = (filterSchool.value || '').toLowerCase();
+      const dt = filterDate.value ? new Date(filterDate.value) : null;
+      const filtered = cachedRows.filter(r => {
+        const matchesSchool = !s || (r.school || '').toLowerCase().includes(s);
+        const matchesDate = !dt || (new Date(r.timestamp)).toDateString() === dt.toDateString();
+        return matchesSchool && matchesDate;
+      });
+      renderTable(filtered);
+    }
+
+    function escapeHtml(text){
+      return (text+'').replace(/[&<>"]+/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]||c));
+    }
+
+    function printResults(){
+      window.print();
+    }
+
+    function exportCSV(){
+      if (!cachedRows.length) return alert('No results to export');
+      const headers = ['name','school','class','score','percent','timestamp'];
+      const lines = [headers.join(',')];
+      cachedRows.forEach(r => {
+        const row = [r.name,r.school,r.class,r.score,r.percent,new Date(r.timestamp).toISOString()].map(v => '"'+(''+(v||'')).replace(/"/g,'""')+'"').join(',');
+        lines.push(row);
+      });
+      const blob = new Blob([lines.join('\n')], {type:'text/csv'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'wiserobotics_results.csv'; a.click(); URL.revokeObjectURL(url);
+    }
+
+  </script>
+</body>
+</html>
